@@ -1,0 +1,7 @@
+numpy
+pandas
+streamlit
+scipy
+openpyxl
+undetected-chromedriver
+selenium
