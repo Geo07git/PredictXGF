@@ -1,18 +1,8 @@
 import time
-import streamlit as st
-
-# încearcă importul doar local
-try:
-    import undetected_chromedriver as uc
-except Exception:
-    uc = None
+import undetected_chromedriver as uc
 
 
 def get_driver(headless: bool = False):
-    # 🔴 dacă suntem în cloud → nu pornim Chrome
-    if uc is None or st.runtime.exists():
-        return None
-
     options = uc.ChromeOptions()
 
     if headless:
@@ -30,5 +20,6 @@ def get_driver(headless: bool = False):
     if not headless:
         time.sleep(1)
         driver.set_window_size(1920, 1080)
+        #driver.set_window_position(20, 20)
 
     return driver
