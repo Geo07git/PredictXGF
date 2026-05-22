@@ -11,9 +11,20 @@ from scipy.stats import poisson
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font
 
+import os
 import queue
-from driver_factory import get_driver
-from extractor import extract_table
+
+RUN_MODE = os.getenv("RUN_MODE", "cloud").strip().lower()
+ALLOW_SCRAPING = RUN_MODE == "local"
+SCRAPING_IMPORT_ERROR = None
+
+if ALLOW_SCRAPING:
+    try:
+        from driver_factory import get_driver
+        from extractor import extract_table
+    except Exception as e:
+        ALLOW_SCRAPING = False
+        SCRAPING_IMPORT_ERROR = str(e)
 
 # ============== CONFIGURARE DE BAZĂ ==============
 
@@ -91,6 +102,11 @@ def _live_log(msg):
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_live_league_df(league_name: str, xg_url: str, headless: bool = False) -> pd.DataFrame:
+    if not ALLOW_SCRAPING:
+        msg = "Live scraping este dezactivat în acest mediu. Folosește Excel local."
+        if SCRAPING_IMPORT_ERROR:
+            msg += f" Detalii import: {SCRAPING_IMPORT_ERROR}"
+        raise RuntimeError(msg)
     driver = get_driver(headless=headless)
     try:
         raw_df = extract_table(driver, xg_url, _live_log)
@@ -1030,7 +1046,13 @@ def render_analysis_sections(df_results_full, home_full, away_full):
 
 
 st.sidebar.header("⚙️ Setări")
-data_mode = st.sidebar.radio("Sursă date ligi", ["Excel local", "Live scrape din catalog URL"], index=0)
+if ALLOW_SCRAPING:
+    data_mode = st.sidebar.radio("Sursă date ligi", ["Excel local", "Live scrape din catalog URL"], index=0)
+else:
+    data_mode = "Excel local"
+    st.sidebar.info("În Streamlit Cloud este activ doar modul Excel local.")
+    if SCRAPING_IMPORT_ERROR:
+        st.sidebar.caption(f"Motiv dezactivare scraping: {SCRAPING_IMPORT_ERROR}")
 
 leagues = {}
 league_names = []
@@ -1098,6 +1120,7 @@ max_goals = st.sidebar.number_input("Max goals Poisson", value=MAX_GOALS, min_va
 max_proposals = st.sidebar.number_input("Max propuneri", value=DEFAULT_MAX_PROPOSALS, min_value=1, max_value=5, step=1)
 st.sidebar.markdown("---")
 st.sidebar.caption("Istoric salvat local în Predictii_xG_Poisson.xlsx")
+st.sidebar.caption("RUN_MODE=" + RUN_MODE + " | Scraping activ: " + ("Da" if ALLOW_SCRAPING else "Nu"))
 
 tab_single, tab_full, tab_prop, tab_multi, tab_scanner, tab_calib, tab_history = st.tabs(
     ["🎯 Single Match", "🔍 Full Analysis", "🧠 Propuneri", "⚡ Multi-Meci", "📊 League Scanner", "🎯 Calibrare Model", "📚 Istoric"]
@@ -1840,4 +1863,3 @@ with tab_history:
                         st.line_chart(df_s.set_index("ts")["profit_cumulat"], use_container_width=True)
                     except Exception:
                         pass
-
