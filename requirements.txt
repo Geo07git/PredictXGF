@@ -5,3 +5,4 @@ scipy
 openpyxl
 undetected-chromedriver
 selenium
+XlsxWriter
