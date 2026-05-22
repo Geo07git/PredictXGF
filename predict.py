@@ -23,7 +23,7 @@ if ALLOW_SCRAPING:
         from driver_factory import get_driver
         from extractor import extract_table
     except Exception as e:
-        ALLOW_SCRAPING = True
+        ALLOW_SCRAPING = False
         SCRAPING_IMPORT_ERROR = str(e)
 
 # ============== CONFIGURARE DE BAZĂ ==============
