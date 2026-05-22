@@ -1044,6 +1044,9 @@ def render_analysis_sections(df_results_full, home_full, away_full):
         })
     st.dataframe(pd.DataFrame(away_rows), use_container_width=True, hide_index=True)
 
+xg_loaded = False
+leagues = {}
+league_names = []
 
 st.sidebar.header("⚙️ Setări")
 if ALLOW_SCRAPING:
