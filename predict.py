@@ -1059,13 +1059,23 @@ league_names = []
 
 if data_mode == "Excel local":
     uploaded_xg = st.sidebar.file_uploader("Încarcă xGDATA.xlsx", type=["xlsx"])
-    xg_loaded = uploaded_xg is not None
-    if not xg_loaded:
-        st.sidebar.info("🔼 Încarcă fișierul cu xG (Excel cu foaie per ligă).")
-    if xg_loaded:
+
+    DEFAULT_FILE = "xgDATA2105.xlsx"
+
+    if uploaded_xg is not None:
         file_buffer = io.BytesIO(uploaded_xg.getvalue())
         leagues = load_xg_workbook(file_buffer)
         league_names = list(leagues.keys())
+        st.sidebar.success("Folosesc fișierul încărcat.")
+    else:
+        if os.path.exists(DEFAULT_FILE):
+            st.sidebar.success("Folosesc automat fișierul din repo.")
+            leagues = load_xg_workbook(DEFAULT_FILE)
+            league_names = list(leagues.keys())
+        else:
+            st.sidebar.info("🔼 Încarcă fișierul cu xG (Excel cu foaie per ligă).")
+            leagues = {}
+            league_names = []
 else:
     uploaded_catalog = st.sidebar.file_uploader("Încarcă catalog ligi+URL (Excel/CSV)", type=["xlsx", "csv"], key="live_catalog_file")
     live_headless = st.sidebar.checkbox("Live scrape headless", value=False, key="live_headless_chk")
