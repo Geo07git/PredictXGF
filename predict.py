@@ -23,7 +23,7 @@ if ALLOW_SCRAPING:
         from driver_factory import get_driver
         from extractor import extract_table
     except Exception as e:
-        ALLOW_SCRAPING = False
+        ALLOW_SCRAPING = True
         SCRAPING_IMPORT_ERROR = str(e)
 
 # ============== CONFIGURARE DE BAZĂ ==============
@@ -1140,7 +1140,7 @@ tab_single, tab_full, tab_prop, tab_multi, tab_scanner, tab_calib, tab_history =
 )
 
 with tab_single:
-    if not xg_loaded:
+    if len(leagues) == 0:
         st.warning("⚠️ Încarcă fișierul xGDATA.xlsx din sidebar pentru a folosi acest tab.")
     else:
         st.subheader("🎯 Analiză meci individual (Poisson)")
@@ -1219,7 +1219,7 @@ with tab_single:
                 st.success(f"✅ Salvat în istoric! Total intrări: {get_history_count(HISTORY_PATH)}")
 
 with tab_full:
-    if not xg_loaded:
+    if len(leagues) == 0:
         st.warning("⚠️ Încarcă fișierul xGDATA.xlsx din sidebar pentru a folosi acest tab.")
     else:
         st.subheader("🔍 Full Match Analysis — toate piețele")
@@ -1487,7 +1487,7 @@ with tab_prop:
                 st.success(f"✅ {len(rows_to_save)} propuneri salvate! Total în istoric: {get_history_count(HISTORY_PATH)}")
 
 with tab_multi:
-    if not xg_loaded:
+    if len(leagues) == 0:
         st.warning("⚠️ Încarcă fișierul xGDATA.xlsx din sidebar pentru a folosi acest tab.")
     else:
         st.subheader("⚡ Multi-Meci — Analiză rundă întreagă")
@@ -1606,7 +1606,7 @@ with tab_multi:
                 del st.session_state["multi_results"]
 
 with tab_scanner:
-    if not xg_loaded:
+    if len(leagues) == 0:
         st.warning("⚠️ Încarcă fișierul xGDATA.xlsx din sidebar pentru a folosi acest tab.")
     else:
         st.subheader("📊 Scanner ligă (Poisson Shortlist)")
