@@ -6,3 +6,4 @@ openpyxl
 undetected-chromedriver
 selenium
 XlsxWriter
+matplotlib
