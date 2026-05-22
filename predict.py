@@ -92,6 +92,15 @@ def _live_log(msg):
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_live_league_df(league_name: str, xg_url: str, headless: bool = False) -> pd.DataFrame:
     driver = get_driver(headless=headless)
+
+    if driver is None:
+        st.warning("Nu pot porni driverul. Verifică dacă folosești un mediu compatibil.")
+        return pd.DataFrame()
+
+    if driver is None:
+        st.warning("Live scraping disabled in cloud")
+        return pd.DataFrame() 
+
     try:
         raw_df = extract_table(driver, xg_url, _live_log)
         return normalize_live_league_df(raw_df)
