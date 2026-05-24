@@ -793,6 +793,97 @@ def grouped_eval_table(df, group_cols, min_n=8):
         rows.append(row)
     return pd.DataFrame(rows)
 
+
+def prepare_walkforward_df(df):
+    df = df.copy()
+    df["ts"] = pd.to_datetime(df["ts"], errors="coerce")
+    df = df.dropna(subset=["ts", "prob", "outcome"]).sort_values("ts").reset_index(drop=True)
+    df["group_key"] = (
+        df["family"].fillna("UNKNOWN").astype(str) + "|" +
+        df["line_bucket"].fillna("UNKNOWN").astype(str) + "|" +
+        df["side_eval"].fillna("UNKNOWN").astype(str)
+    )
+    return df
+
+def compute_drawdown(equity_series):
+    roll_max = equity_series.cummax()
+    drawdown = equity_series - roll_max
+    return drawdown
+
+def walkforward_backtest(df, min_train=30, retrain_step=10, prob_col="prob"):
+    df = prepare_walkforward_df(df)
+    if len(df) < min_train + 10:
+        return pd.DataFrame(), {}
+
+    preds = []
+    last_fit_idx = -1
+    group_stats = None
+    global_mean = None
+
+    for i in range(len(df)):
+        if i < min_train:
+            continue
+        if group_stats is None or (i - last_fit_idx) >= retrain_step:
+            train = df.iloc[:i].copy()
+            group_stats = train.groupby("group_key")["outcome"].agg(["mean", "count"]).reset_index()
+            group_stats = group_stats.rename(columns={"mean": "wf_prob_raw", "count": "train_n"})
+            global_mean = float(train["outcome"].mean())
+            last_fit_idx = i
+
+        row = df.iloc[[i]].copy()
+        row = row.merge(group_stats, on="group_key", how="left")
+        raw = row["wf_prob_raw"].iloc[0] if pd.notna(row["wf_prob_raw"].iloc[0]) else global_mean
+        train_n = row["train_n"].iloc[0] if pd.notna(row["train_n"].iloc[0]) else 0
+        shrink = min(float(train_n) / 20.0, 1.0)
+        wf_prob = shrink * float(raw) + (1 - shrink) * float(global_mean)
+        wf_prob = float(np.clip(wf_prob, 1e-6, 1 - 1e-6))
+
+        stake_ev = np.nan
+        if pd.notna(row["odds"].iloc[0]) and float(row["odds"].iloc[0]) > 1.0:
+            stake_ev = wf_prob * float(row["odds"].iloc[0]) - 1
+
+        do_bet = pd.notna(stake_ev) and stake_ev > 0
+        realized_profit = np.nan
+        if do_bet:
+            rez = row["rezultat"].iloc[0]
+            odds = row["odds"].iloc[0]
+            realized_profit = calc_profit(rez, odds)
+
+        preds.append({
+            "ts": row["ts"].iloc[0],
+            "league": row["league"].iloc[0],
+            "family": row["family"].iloc[0],
+            "line_bucket": row["line_bucket"].iloc[0],
+            "side_eval": row["side_eval"].iloc[0],
+            "outcome": int(row["outcome"].iloc[0]),
+            "model_prob": float(row[prob_col].iloc[0]),
+            "wf_prob": wf_prob,
+            "implied_prob": row["implied_prob"].iloc[0],
+            "odds": row["odds"].iloc[0],
+            "ev_wf": stake_ev,
+            "bet_wf": int(bool(do_bet)),
+            "profit_wf": realized_profit,
+            "train_size": i
+        })
+
+    pred_df = pd.DataFrame(preds)
+    if pred_df.empty:
+        return pred_df, {}
+
+    pred_df["profit_wf_filled"] = pred_df["profit_wf"].fillna(0.0)
+    pred_df["equity_wf"] = pred_df["profit_wf_filled"].cumsum()
+    pred_df["drawdown_wf"] = compute_drawdown(pred_df["equity_wf"])
+
+    summary = {
+        "n_test": int(len(pred_df)),
+        "n_bets": int(pred_df["bet_wf"].sum()),
+        "avg_ev": float(pred_df.loc[pred_df["bet_wf"] == 1, "ev_wf"].mean()) if (pred_df["bet_wf"] == 1).any() else np.nan,
+        "profit_total": float(pred_df["profit_wf_filled"].sum()),
+        "roi": float(pred_df.loc[pred_df["bet_wf"] == 1, "profit_wf"].sum() / pred_df["bet_wf"].sum()) if pred_df["bet_wf"].sum() > 0 else np.nan,
+        "max_drawdown": float(pred_df["drawdown_wf"].min()) if len(pred_df) else np.nan,
+    }
+    return pred_df, summary
+
 # ============== SIDEBAR ==============
 
 st.sidebar.header("⚙️ Setări")
@@ -956,12 +1047,13 @@ with tab_calib:
             if n_total < 20:
                 st.warning("Sub 20 rezultate, concluziile sunt foarte instabile. Interpretarea trebuie făcută cu prudență.")
 
-            cal1, cal2, cal3, cal4, cal5 = st.tabs([
+            cal1, cal2, cal3, cal4, cal5, cal6 = st.tabs([
                 "📊 Calibrare generală",
                 "🪣 Grupuri realiste",
                 "📈 Skill vs odds",
                 "📐 Calibration slope",
-                "🔬 Split-uri evaluare"
+                "🔬 Split-uri evaluare",
+                "🚶 Walk-forward"
             ])
 
             with cal1:
@@ -1049,6 +1141,61 @@ with tab_calib:
                 else:
                     keep_cols = [c for c in ["home_away_split", "N", "Model Prob %", "Win Rate %", "Gap %", "Model Brier", "Odds Brier", "Brier Skill vs Odds %"] if c in ha_eval.columns]
                     st.dataframe(ha_eval[keep_cols].sort_values("N", ascending=False), use_container_width=True, hide_index=True)
+
+            with cal6:
+                st.markdown("#### Walk-forward = test de realitate")
+                st.caption("Split temporal, retraining incremental și tracking EV / ROI / drawdown pe ferestre out-of-sample.")
+
+                if df_calib["ts"].isna().all():
+                    st.warning("Fișierul nu conține coloana ts validă. Walk-forward are nevoie de timestamp pentru split temporal.")
+                else:
+                    wf_col1, wf_col2 = st.columns(2)
+                    with wf_col1:
+                        min_train = st.number_input("Minim observații train", min_value=20, max_value=500, value=30, step=5, key="wf_min_train")
+                    with wf_col2:
+                        retrain_step = st.number_input("Retrain incremental la fiecare N meciuri", min_value=1, max_value=100, value=10, step=1, key="wf_retrain_step")
+
+                    wf_df, wf_summary = walkforward_backtest(df_calib, min_train=int(min_train), retrain_step=int(retrain_step), prob_col="prob")
+                    if wf_df.empty:
+                        st.info("Nu sunt suficiente date pentru walk-forward cu setările actuale.")
+                    else:
+                        a1, a2, a3, a4, a5 = st.columns(5)
+                        a1.metric("Meciuri test", wf_summary.get("n_test", 0))
+                        a2.metric("Beturi plasate", wf_summary.get("n_bets", 0))
+                        a3.metric("EV mediu", "n/a" if pd.isna(wf_summary.get("avg_ev")) else f"{wf_summary['avg_ev']:.3f}")
+                        a4.metric("ROI", "n/a" if pd.isna(wf_summary.get("roi")) else f"{wf_summary['roi']*100:.1f}%")
+                        a5.metric("Max drawdown", "n/a" if pd.isna(wf_summary.get("max_drawdown")) else f"{wf_summary['max_drawdown']:.2f}u")
+                        st.write(f"Profit total walk-forward: {wf_summary.get('profit_total', 0):.2f}u")
+
+                        wf_model_brier, wf_model_logloss = compute_binary_metrics(wf_df["outcome"], wf_df["wf_prob"])
+                        st.write(f"Walk-forward Brier: {wf_model_brier:.4f} | Walk-forward Log Loss: {wf_model_logloss:.4f}")
+                        if wf_df["implied_prob"].notna().sum() >= 20:
+                            mask = wf_df["implied_prob"].notna()
+                            wf_odds_brier, wf_odds_logloss = compute_binary_metrics(wf_df.loc[mask, "outcome"], wf_df.loc[mask, "implied_prob"])
+                            st.write(
+                                f"Baseline odds pe setul walk-forward — Brier: {wf_odds_brier:.4f} | "
+                                f"Log Loss: {wf_odds_logloss:.4f} | "
+                                f"Skill Brier: {(1 - wf_model_brier / wf_odds_brier)*100:.1f}%"
+                            )
+
+                        st.markdown("#### Equity curve")
+                        st.line_chart(wf_df.set_index("ts")[["equity_wf"]], use_container_width=True)
+                        st.markdown("#### Drawdown")
+                        st.line_chart(wf_df.set_index("ts")[["drawdown_wf"]], use_container_width=True)
+
+                        st.markdown("#### Test pe fiecare segment")
+                        seg = wf_df.groupby(["family", "line_bucket", "side_eval"]).agg(
+                            N=("outcome", "count"),
+                            Bets=("bet_wf", "sum"),
+                            Avg_EV=("ev_wf", "mean"),
+                            Profit=("profit_wf", "sum")
+                        ).reset_index()
+                        seg = seg[seg["N"] >= 5].copy()
+                        if seg.empty:
+                            st.info("Nu există suficiente observații per segment în walk-forward.")
+                        else:
+                            seg["ROI %"] = np.where(seg["Bets"] > 0, seg["Profit"] / seg["Bets"] * 100, np.nan)
+                            st.dataframe(seg.sort_values(["N", "ROI %"], ascending=[False, False]), use_container_width=True, hide_index=True)
 
 # ──────────────── TAB: ISTORIC ────────────────
 with tab_history:
