@@ -684,6 +684,115 @@ HIST_COLUMNS = [
 def resolve_result_conflict(market: str, line, score_home: int, score_away: int) -> str:
     return resolve_result(market, line, score_home, score_away)
 
+# ============== HELPERS CALIBRARE REALISTĂ ==============
+
+def safe_clip_prob(s):
+    return pd.to_numeric(s, errors="coerce").clip(1e-6, 1 - 1e-6)
+
+def infer_family_from_market(market_name: str) -> str:
+    meta = MARKET_MAP.get(str(market_name), {})
+    return meta.get("family", "UNKNOWN")
+
+def infer_side_from_market(market_name: str) -> str:
+    meta = MARKET_MAP.get(str(market_name), {})
+    team_side = meta.get("team_side")
+    side = meta.get("side")
+    if team_side in ["home", "away"] and side in ["over", "under"]:
+        return f"{team_side}_{side}"
+    return str(side) if side is not None else "unknown"
+
+def infer_line_bucket(line_val):
+    try:
+        if pd.isna(line_val):
+            return "no_line"
+        x = float(line_val)
+    except Exception:
+        return "no_line"
+    if x <= 0.5:
+        return "<=0.5"
+    if x <= 1.5:
+        return "1.0-1.5"
+    if x <= 2.5:
+        return "2.0-2.5"
+    if x <= 3.5:
+        return "3.0-3.5"
+    return ">=4.0"
+
+def implied_prob_from_odds(odds):
+    odds = pd.to_numeric(odds, errors="coerce")
+    out = pd.Series(np.nan, index=odds.index, dtype=float)
+    mask = odds > 1.0
+    out.loc[mask] = 1.0 / odds.loc[mask]
+    return out.clip(1e-6, 1 - 1e-6)
+
+def add_evaluation_groups(df):
+    df = df.copy()
+    df["family"] = df["market"].apply(infer_family_from_market)
+    df["side_eval"] = df["market"].apply(infer_side_from_market)
+    df["line_bucket"] = df["line"].apply(infer_line_bucket)
+    df["league_group"] = df["league"].fillna("UNKNOWN").astype(str)
+    home_tokens = df["home"].fillna("UNKNOWN").astype(str).str.upper().str[:1]
+    away_tokens = df["away"].fillna("UNKNOWN").astype(str).str.upper().str[:1]
+    df["home_away_split"] = np.where((home_tokens <= "M") & (away_tokens <= "M"), "A-M vs A-M",
+                               np.where((home_tokens > "M") & (away_tokens > "M"), "N-Z vs N-Z", "mixed"))
+    return df
+
+def compute_binary_metrics(y, p):
+    y = np.asarray(y, dtype=float)
+    p = np.asarray(p, dtype=float)
+    p = np.clip(p, 1e-6, 1 - 1e-6)
+    brier = np.mean((p - y) ** 2)
+    log_loss = -np.mean(y * np.log(p) + (1 - y) * np.log(1 - p))
+    return float(brier), float(log_loss)
+
+def fit_calibration_slope_intercept(y, p):
+    y = np.asarray(y, dtype=float)
+    p = np.clip(np.asarray(p, dtype=float), 1e-6, 1 - 1e-6)
+    if len(y) < 20 or len(np.unique(y)) < 2:
+        return np.nan, np.nan
+    x = np.log(p / (1 - p))
+    X = np.column_stack([np.ones(len(x)), x])
+    beta = np.zeros(X.shape[1])
+    for _ in range(50):
+        eta = X @ beta
+        mu = 1 / (1 + np.exp(-eta))
+        w = np.clip(mu * (1 - mu), 1e-8, None)
+        z = eta + (y - mu) / w
+        XtW = X.T * w
+        try:
+            beta_new = np.linalg.solve(XtW @ X, XtW @ z)
+        except np.linalg.LinAlgError:
+            return np.nan, np.nan
+        if np.max(np.abs(beta_new - beta)) < 1e-8:
+            beta = beta_new
+            break
+        beta = beta_new
+    return float(beta[1]), float(beta[0])
+
+def grouped_eval_table(df, group_cols, min_n=8):
+    rows = []
+    for keys, g in df.groupby(group_cols, dropna=False):
+        if len(g) < min_n:
+            continue
+        model_brier, model_logloss = compute_binary_metrics(g["outcome"], g["prob"])
+        row = {"N": len(g), "Model Brier": model_brier, "Model LogLoss": model_logloss,
+               "Model Prob %": g["prob"].mean() * 100, "Win Rate %": g["outcome"].mean() * 100,
+               "Gap %": (g["prob"].mean() - g["outcome"].mean()) * 100}
+        if isinstance(keys, tuple):
+            for col, val in zip(group_cols, keys):
+                row[col] = val
+        else:
+            row[group_cols[0]] = keys
+        if g["implied_prob"].notna().sum() >= min_n:
+            mask = g["implied_prob"].notna()
+            base_brier, base_logloss = compute_binary_metrics(g.loc[mask, "outcome"], g.loc[mask, "implied_prob"])
+            row["Odds Brier"] = base_brier
+            row["Odds LogLoss"] = base_logloss
+            row["Brier Skill vs Odds %"] = (1 - model_brier / base_brier) * 100 if base_brier > 0 else np.nan
+            row["LogLoss Skill vs Odds %"] = (1 - model_logloss / base_logloss) * 100 if base_logloss > 0 else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows)
+
 # ============== SIDEBAR ==============
 
 st.sidebar.header("⚙️ Setări")
@@ -833,94 +942,113 @@ with tab_calib:
         if df_calib.empty:
             st.info("Fișierul nu conține rezultate finalizate (W/L/V). Adaugă rezultate reale în fișierul Excel.")
         else:
-            df_calib["prob"] = pd.to_numeric(df_calib["prob"], errors="coerce")
+            df_calib["prob"] = safe_clip_prob(df_calib["prob"])
             df_calib["push_prob"] = pd.to_numeric(df_calib["push_prob"], errors="coerce")
             df_calib["odds"] = pd.to_numeric(df_calib["odds"], errors="coerce")
             df_calib["profit"] = pd.to_numeric(df_calib["profit"], errors="coerce")
             df_calib = df_calib.dropna(subset=["prob"])
             df_calib["outcome"] = (df_calib["rezultat"] == "W").astype(int)
+            df_calib["implied_prob"] = implied_prob_from_odds(df_calib["odds"])
+            df_calib = add_evaluation_groups(df_calib)
             n_total = len(df_calib)
             st.markdown(f"**Pariuri analizate:** {n_total} (W/L/V)")
-            if n_total < 10:
-                st.warning("Sunt necesare cel puțin 10 rezultate pentru o calibrare relevantă statistic.")
+            st.caption("Evaluarea de mai jos este intenționat conservatoare: compară modelul cu probabilitatea implicită din cote, separă grupurile de piață și raportează calibration slope.")
+            if n_total < 20:
+                st.warning("Sub 20 rezultate, concluziile sunt foarte instabile. Interpretarea trebuie făcută cu prudență.")
 
-            cal1, cal2, cal3, cal4 = st.tabs(["📊 Calibrare generală", "🪣 Bucket Analysis", "📈 Brier & Log Loss", "🔬 Per piață"])
+            cal1, cal2, cal3, cal4, cal5 = st.tabs([
+                "📊 Calibrare generală",
+                "🪣 Grupuri realiste",
+                "📈 Skill vs odds",
+                "📐 Calibration slope",
+                "🔬 Split-uri evaluare"
+            ])
 
             with cal1:
                 avg_prob = df_calib["prob"].mean()
                 actual_wr = df_calib["outcome"].mean()
                 calib_error = avg_prob - actual_wr
                 k1, k2, k3 = st.columns(3)
-                k1.metric("Prob medie estimată", f"{avg_prob*100:.1f}%")
+                k1.metric("Prob medie model", f"{avg_prob*100:.1f}%")
                 k2.metric("Win rate real", f"{actual_wr*100:.1f}%")
-                k3.metric("Eroare calibrare", f"{calib_error*100:.1f} pp")
-                prob_bins = pd.cut(df_calib["prob"], bins=10)
-                bin_counts = df_calib.groupby(prob_bins, observed=True)["outcome"].agg(["count", "mean"]).reset_index()
-                bin_counts.columns = ["Interval prob", "Nr. pariuri", "Win rate real"]
-                bin_counts["Prob medie bin"] = df_calib.groupby(prob_bins, observed=True)["prob"].mean().values
-                bin_counts["Interval prob"] = bin_counts["Interval prob"].astype(str)
-                bin_counts["Win rate real %"] = (bin_counts["Win rate real"] * 100).round(1)
-                bin_counts["Prob medie %"] = (bin_counts["Prob medie bin"] * 100).round(1)
-                bin_counts["Diferență %"] = (bin_counts["Prob medie bin"] - bin_counts["Win rate real"]).mul(100).round(1)
-                st.dataframe(bin_counts[["Interval prob", "Nr. pariuri", "Prob medie %", "Win rate real %", "Diferență %"]], use_container_width=True, hide_index=True)
+                k3.metric("Gap agregat", f"{calib_error*100:.1f} pp")
+
+                prob_bins = pd.cut(df_calib["prob"], bins=np.linspace(0, 1, 11), include_lowest=True)
+                bin_counts = df_calib.groupby(prob_bins, observed=True).agg(
+                    Nr_pariuri=("outcome", "count"),
+                    Win_rate_real=("outcome", "mean"),
+                    Prob_medie_bin=("prob", "mean")
+                ).reset_index()
+                bin_counts["Interval prob"] = bin_counts["prob"].astype(str) if "prob" in bin_counts.columns else bin_counts.iloc[:, 0].astype(str)
+                if "prob" in bin_counts.columns:
+                    bin_counts = bin_counts.drop(columns=["prob"])
+                bin_counts["Win rate real %"] = (bin_counts["Win_rate_real"] * 100).round(1)
+                bin_counts["Prob medie %"] = (bin_counts["Prob_medie_bin"] * 100).round(1)
+                bin_counts["Diferență %"] = (bin_counts["Prob_medie_bin"] - bin_counts["Win_rate_real"]).mul(100).round(1)
+                st.dataframe(bin_counts[["Interval prob", "Nr_pariuri", "Prob medie %", "Win rate real %", "Diferență %"]], use_container_width=True, hide_index=True)
 
             with cal2:
-                n_buckets = st.slider("Număr de grupe (buckets)", min_value=3, max_value=10, value=5, key="calib_buckets")
-                df_calib["bucket"] = pd.qcut(df_calib["prob"], q=n_buckets, duplicates="drop")
-                bucket_df = df_calib.groupby("bucket", observed=True).agg(
-                    Nr_pariuri=("outcome", "count"),
-                    Prob_medie=("prob", "mean"),
-                    Win_rate_real=("outcome", "mean")
-                ).reset_index()
-                bucket_df["Bucket"] = bucket_df["bucket"].astype(str)
-                bucket_df["Prob medie %"] = (bucket_df["Prob_medie"] * 100).round(1)
-                bucket_df["Win rate real %"] = (bucket_df["Win_rate_real"] * 100).round(1)
-                bucket_df["Gap %"] = (bucket_df["Prob_medie"] - bucket_df["Win_rate_real"]).mul(100).round(1)
-                st.dataframe(bucket_df[["Bucket", "Nr_pariuri", "Prob medie %", "Win rate real %", "Gap %"]], use_container_width=True, hide_index=True)
-                chart_cal = bucket_df[["Prob medie %", "Win rate real %"]].copy()
-                chart_cal["Linie perfectă"] = chart_cal["Prob medie %"]
-                chart_cal = chart_cal.set_index("Prob medie %")
-                st.line_chart(chart_cal, use_container_width=True)
+                st.markdown("#### Regrupare pe family + line bucket + side")
+                grouped = grouped_eval_table(df_calib, ["family", "line_bucket", "side_eval"], min_n=8)
+                if grouped.empty:
+                    st.info("Nu există suficiente date pentru gruparea family + line bucket + side (minim 8 rezultate pe grup).")
+                else:
+                    grouped = grouped.sort_values(["N", "Gap %"], ascending=[False, True], key=lambda s: abs(s) if s.name == "Gap %" else s)
+                    for col in ["Model Brier", "Model LogLoss", "Odds Brier", "Odds LogLoss", "Brier Skill vs Odds %", "LogLoss Skill vs Odds %", "Model Prob %", "Win Rate %", "Gap %"]:
+                        if col in grouped.columns:
+                            grouped[col] = pd.to_numeric(grouped[col], errors="coerce").round(3)
+                    st.dataframe(grouped, use_container_width=True, hide_index=True)
 
             with cal3:
                 outcomes = df_calib["outcome"].values
                 probs = df_calib["prob"].values
-                brier = np.mean((probs - outcomes) ** 2)
-                eps = 1e-7
-                probs_clip = np.clip(probs, eps, 1 - eps)
-                log_loss = -np.mean(outcomes * np.log(probs_clip) + (1 - outcomes) * np.log(1 - probs_clip))
-                base_prob = outcomes.mean()
-                brier_base = np.mean((np.full_like(probs, base_prob) - outcomes) ** 2)
-                logloss_base = -np.mean(outcomes * np.log(base_prob + eps) + (1 - outcomes) * np.log(1 - base_prob + eps))
-                brier_skill = 1 - brier / brier_base if brier_base > 0 else 0
-                logloss_skill = 1 - log_loss / logloss_base if logloss_base > 0 else 0
+                model_brier, model_log_loss = compute_binary_metrics(outcomes, probs)
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Brier Score", f"{brier:.4f}")
-                m2.metric("Brier Skill Score", f"{brier_skill*100:.1f}%")
-                m3.metric("Log Loss", f"{log_loss:.4f}")
-                m4.metric("Log Loss Skill", f"{logloss_skill*100:.1f}%")
+                m1.metric("Model Brier", f"{model_brier:.4f}")
+                m3.metric("Model Log Loss", f"{model_log_loss:.4f}")
+
+                if df_calib["implied_prob"].notna().sum() >= 20:
+                    mask = df_calib["implied_prob"].notna()
+                    odds_brier, odds_log_loss = compute_binary_metrics(df_calib.loc[mask, "outcome"], df_calib.loc[mask, "implied_prob"])
+                    brier_skill = 1 - model_brier / odds_brier if odds_brier > 0 else np.nan
+                    logloss_skill = 1 - model_log_loss / odds_log_loss if odds_log_loss > 0 else np.nan
+                    m2.metric("Skill Brier vs odds", f"{brier_skill*100:.1f}%")
+                    m4.metric("Skill LogLoss vs odds", f"{logloss_skill*100:.1f}%")
+                    st.caption("Skill pozitiv = modelul bate baseline-ul din cotele bookmakerului. Skill negativ = modelul este mai slab decât baseline-ul.")
+                    st.write(f"Baseline odds — Brier: {odds_brier:.4f} | Log Loss: {odds_log_loss:.4f}")
+                else:
+                    m2.metric("Skill Brier vs odds", "n/a")
+                    m4.metric("Skill LogLoss vs odds", "n/a")
+                    st.warning("Prea puține cote valide pentru un baseline realist bazat pe implied probability.")
 
             with cal4:
-                market_cal = df_calib.groupby(["section", "market"]).agg(
-                    Nr=("outcome", "count"),
-                    Prob_medie=("prob", "mean"),
-                    Win_rate=("outcome", "mean"),
-                    Profit=("profit", "sum")
-                ).reset_index()
-                market_cal = market_cal[market_cal["Nr"] >= 3]
-                if market_cal.empty:
-                    st.info("Nicio piață nu are suficiente date (minim 3 rezultate per piață).")
+                slope, intercept = fit_calibration_slope_intercept(df_calib["outcome"], df_calib["prob"])
+                c1, c2 = st.columns(2)
+                c1.metric("Calibration slope", "n/a" if pd.isna(slope) else f"{slope:.3f}")
+                c2.metric("Calibration intercept", "n/a" if pd.isna(intercept) else f"{intercept:.3f}")
+                st.markdown("""
+- **Slope < 1**: predicțiile sunt prea extreme, deci evaluarea optimistă dinainte te-ar fi putut păcăli.
+- **Slope > 1**: predicțiile sunt prea conservatoare.
+- **Intercept < 0**: modelul supraestimează win rate-ul.
+- **Intercept > 0**: modelul subestimează win rate-ul.
+""")
+
+            with cal5:
+                st.markdown("#### Split pe ligi")
+                league_eval = grouped_eval_table(df_calib, ["league_group"], min_n=8)
+                if league_eval.empty:
+                    st.info("Nu există suficiente rezultate per ligă pentru evaluare separată.")
                 else:
-                    market_cal["Gap %"] = (market_cal["Prob_medie"] - market_cal["Win_rate"]).mul(100).round(1)
-                    market_cal["Prob medie %"] = (market_cal["Prob_medie"] * 100).round(1)
-                    market_cal["Win rate %"] = (market_cal["Win_rate"] * 100).round(1)
-                    market_cal = market_cal.sort_values("Gap %", key=abs)
-                    st.dataframe(
-                        market_cal[["section", "market", "Nr", "Prob medie %", "Win rate %", "Gap %", "Profit"]].rename(
-                            columns={"section": "Secțiune", "market": "Piață"}
-                        ),
-                        use_container_width=True, hide_index=True
-                    )
+                    keep_cols = [c for c in ["league_group", "N", "Model Prob %", "Win Rate %", "Gap %", "Model Brier", "Odds Brier", "Brier Skill vs Odds %"] if c in league_eval.columns]
+                    st.dataframe(league_eval[keep_cols].sort_values("N", ascending=False), use_container_width=True, hide_index=True)
+
+                st.markdown("#### Split home/away proxy")
+                ha_eval = grouped_eval_table(df_calib, ["home_away_split"], min_n=8)
+                if ha_eval.empty:
+                    st.info("Nu există suficiente rezultate pentru split-ul home/away proxy.")
+                else:
+                    keep_cols = [c for c in ["home_away_split", "N", "Model Prob %", "Win Rate %", "Gap %", "Model Brier", "Odds Brier", "Brier Skill vs Odds %"] if c in ha_eval.columns]
+                    st.dataframe(ha_eval[keep_cols].sort_values("N", ascending=False), use_container_width=True, hide_index=True)
 
 # ──────────────── TAB: ISTORIC ────────────────
 with tab_history:
