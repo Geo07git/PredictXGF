@@ -992,7 +992,7 @@ with tab_single:
                 df_all = pd.DataFrame(all_rows)
                 df_bet = df_all[df_all["Verdict"].isin(["BET", "LEAN"])]
                 if not df_bet.empty:
-                    st.dataframe(df_bet.style.applymap(style_verdict, subset=["Verdict"]), use_container_width=True, hide_index=True)
+                    st.dataframe(df_bet.style.map(style_verdict, subset=["Verdict"]), use_container_width=True, hide_index=True)
                 else:
                     st.info("Nicio piață BET/LEAN pentru această cotă.")
             else:
