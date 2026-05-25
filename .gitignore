@@ -5,3 +5,11 @@ venv/
 .venv/
 
 .DS_Store
+
+# Excel-uri locale / rezultate
+LigicuDate.xlsx
+Predictii_propuse.xlsx
+
+# scripturi experimentale
+predict_cloud_bun.py
+predict_live.py
