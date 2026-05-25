@@ -6,3 +6,16 @@
 *.ini text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# cod
+*.py text eol=lf
+
+# repo meta
+*.md text eol=lf
+*.txt text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# config
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
