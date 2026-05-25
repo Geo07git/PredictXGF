@@ -145,6 +145,7 @@ Fișierul trebuie să aibă sheet-ul **Istoric** cu coloanele standard:
 
     st.stop()
 
+HISTORY_PATH = "Predictii_xG_Poisson.xlsx"
 MAX_GOALS = 7
 DEFAULT_MIN_EV = 0.03
 DEFAULT_MIN_PROB = 0.50
@@ -1006,25 +1007,41 @@ with tab_calib:
         "pentru a valida acuratețea modelului Poisson."
     )
 
+    df_calib_raw = pd.DataFrame(columns=HIST_COLUMNS)
+    if os.path.exists(HISTORY_PATH):
+        try:
+            df_calib_raw = pd.read_excel(HISTORY_PATH, sheet_name="Istoric")
+            for col in HIST_COLUMNS:
+                if col not in df_calib_raw.columns:
+                    df_calib_raw[col] = None
+            df_calib_raw = df_calib_raw[HIST_COLUMNS].reset_index(drop=True)
+        except Exception:
+            df_calib_raw = pd.DataFrame(columns=HIST_COLUMNS)
+
     with st.expander("📂 Încarcă fișier istoric pentru calibrare", expanded=True):
+        if os.path.exists(HISTORY_PATH) and len(df_calib_raw) > 0:
+            st.success(f"Fișier implicit încărcat din repo: {HISTORY_PATH} ({len(df_calib_raw)} intrări).")
+        elif os.path.exists(HISTORY_PATH):
+            st.info(f"Fișierul {HISTORY_PATH} există în repo, dar nu a putut fi citit corect din sheet-ul 'Istoric'.")
+        else:
+            st.info(f"Fișierul implicit {HISTORY_PATH} nu a fost găsit în repo. Poți încărca unul manual.")
+
         uploaded_calib = st.file_uploader(
-            "Încarcă fișierul Excel cu predicții (sheet 'Istoric')",
+            "Încarcă fișierul Excel cu predicții (opțional override, sheet 'Istoric')",
             type=["xlsx"],
             key="calib_upload"
         )
 
-    df_calib_raw = pd.DataFrame(columns=HIST_COLUMNS)
-
-    if uploaded_calib is not None:
-        try:
-            df_calib_raw = pd.read_excel(io.BytesIO(uploaded_calib.getvalue()), sheet_name="Istoric")
-            for col in HIST_COLUMNS:
-                if col not in df_calib_raw.columns:
-                    df_calib_raw[col] = None
-            st.success(f"✅ Fișier încărcat: {len(df_calib_raw)} intrări.")
-        except Exception as e:
-            st.error(f"❌ Eroare la citire fișier: {e}")
-
+        if uploaded_calib is not None:
+            try:
+                df_calib_raw = pd.read_excel(io.BytesIO(uploaded_calib.getvalue()), sheet_name="Istoric")
+                for col in HIST_COLUMNS:
+                    if col not in df_calib_raw.columns:
+                        df_calib_raw[col] = None
+                df_calib_raw = df_calib_raw[HIST_COLUMNS].reset_index(drop=True)
+                st.success(f"✅ Fișier încărcat manual: {len(df_calib_raw)} intrări.")
+            except Exception as e:
+                st.error(f"❌ Eroare la citire fișier: {e}")
     if df_calib_raw.empty:
         st.info("Încarcă un fișier cu predicții și rezultate W/L/V pentru a vedea calibrarea modelului.")
     else:
@@ -1205,12 +1222,31 @@ with tab_history:
         "Poți introduce rezultate reale (goluri) și urmări performanța modelului."
     )
 
+    default_hist_df = pd.DataFrame(columns=HIST_COLUMNS)
+    if os.path.exists(HISTORY_PATH):
+        try:
+            default_hist_df = pd.read_excel(HISTORY_PATH, sheet_name="Istoric")
+            for col in HIST_COLUMNS:
+                if col not in default_hist_df.columns:
+                    default_hist_df[col] = None
+            default_hist_df = default_hist_df[HIST_COLUMNS].reset_index(drop=True)
+        except Exception:
+            default_hist_df = pd.DataFrame(columns=HIST_COLUMNS)
+
     if "hist_df" not in st.session_state:
-        st.session_state["hist_df"] = pd.DataFrame(columns=HIST_COLUMNS)
+        st.session_state["hist_df"] = default_hist_df.copy()
+        st.session_state["hist_source"] = "repo" if len(default_hist_df) > 0 else "empty"
 
     with st.expander("📂 Încarcă fișier istoric", expanded=True):
+        if os.path.exists(HISTORY_PATH) and len(default_hist_df) > 0:
+            st.success(f"Fișier implicit încărcat din repo: {HISTORY_PATH} ({len(default_hist_df)} intrări).")
+        elif os.path.exists(HISTORY_PATH):
+            st.info(f"Fișierul {HISTORY_PATH} există în repo, dar nu a putut fi citit corect din sheet-ul 'Istoric'.")
+        else:
+            st.info(f"Fișierul implicit {HISTORY_PATH} nu a fost găsit în repo. Poți încărca unul manual.")
+
         uploaded_hist = st.file_uploader(
-            "Încarcă Predictii_xG_Poisson.xlsx (sheet 'Istoric')",
+            "Încarcă Predictii_xG_Poisson.xlsx (opțional override, sheet 'Istoric')",
             type=["xlsx"],
             key="upload_hist"
         )
@@ -1222,13 +1258,13 @@ with tab_history:
                         df_imp[col] = None
                 df_imp = df_imp[HIST_COLUMNS].reset_index(drop=True)
                 st.session_state["hist_df"] = df_imp
-                st.success(f"✅ Importat {len(df_imp)} intrări.")
+                st.session_state["hist_source"] = "upload"
+                st.success(f"✅ Importat manual {len(df_imp)} intrări.")
             except Exception as e:
                 st.error(f"❌ Eroare import: {e}")
 
     df = st.session_state["hist_df"]
     n = len(df)
-
     col_r, col_dl = st.columns([1, 1])
     with col_r:
         if st.button("🔄 Resetează sesiunea"):
